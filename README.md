@@ -25,6 +25,7 @@
 - AstrBot LLM 摘要（push / release）
 - 手动测试通知
 - 状态与最近错误查看
+- aiocqhttp 路由持久化（按当前群会话动态识别适配器实例）
 
 ### 当前消息平台
 
@@ -41,6 +42,8 @@
 - `release` 默认只看已发布版本，不推送 draft
 - 分支 rename 在轮询模式下当前视作“删 + 建”
 - `push` 与 `release` 摘要复用 AstrBot 当前会话默认模型能力
+- 主动推送会持久化当前 aiocqhttp 群会话路由，适配实例 ID 不必字面量等于 `aiocqhttp`
+- 通知文本统一按单条多行消息发送，避免字段粘连
 
 ## 安装方式
 
@@ -132,7 +135,7 @@ pip install -r requirements.txt
 
 ### 1. 先把目标群加入白名单
 
-在目标 QQ 群里执行：
+在目标 QQ 群（`aiocqhttp`）里执行：
 
 ```text
 /ghwatch whitelist
@@ -143,6 +146,8 @@ pip install -r requirements.txt
 ```text
 /ghwatch unwhitelist
 ```
+
+> 说明：插件当前只识别 `aiocqhttp` 群会话。加入白名单时会记录当前群会话的真实路由信息，后续主动推送会按该路由发送。若更换了适配器实例或路由信息失效，可在目标群重新执行一次 `/ghwatch whitelist`。
 
 ### 2. 添加仓库订阅
 
@@ -194,6 +199,11 @@ pip install -r requirements.txt
 /ghwatch errors
 ```
 
+## 命令行为说明
+
+- 只有白名单中的 `aiocqhttp` 群可以正常执行订阅相关命令。
+- 如果当前群号相同，但不是之前绑定的 aiocqhttp 会话实例，插件会提示重新执行 `/ghwatch whitelist` 以刷新路由绑定。
+
 ## 命令列表
 
 | 命令 | 说明 |
@@ -228,6 +238,15 @@ pip install -r requirements.txt
 标题：v1.2.3
 摘要：这个版本主要……
 链接：https://github.com/owner/repo/releases/tag/v1.2.3
+```
+
+### 测试通知
+
+```text
+[GitHub更新] owner/repo
+类型：测试通知
+标题：这是一条测试通知
+链接：https://github.com/owner/repo
 ```
 
 ### PR
@@ -270,7 +289,7 @@ pip install -r requirements.txt
 
 ## 开发状态
 
-当前版本：`v0.1.0`
+当前版本：`v0.1.1`
 
 定位：
 

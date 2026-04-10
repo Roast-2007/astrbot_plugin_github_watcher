@@ -5,10 +5,8 @@ from dataclasses import replace
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Poke
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
-from astrbot.core.message.message_event_result import MessageChain
 
 from .github_client import GitHubClient
 from .models import GroupSubscription, NormalizedEvent, RepoRef, RepoSubscription, RuntimeState, StoredRepoState
@@ -19,7 +17,7 @@ from .storage import Storage
 from .summarizer import Summarizer
 
 
-@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.1.0")
+@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.1.1")
 class GitHubWatcherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
@@ -338,9 +336,7 @@ class GitHubWatcherPlugin(Star):
             self._storage.save(self._state)
 
     async def _maybe_ack_command_with_poke(self, event: AstrMessageEvent) -> None:
-        if self._find_group_by_event(event) is None:
-            return
-        await event.send(MessageChain([Poke(id=str(event.get_sender_id()))]))
+        return
 
     def _is_aiocqhttp_event(self, event: AstrMessageEvent) -> bool:
         return event.get_platform_name() == "aiocqhttp"
