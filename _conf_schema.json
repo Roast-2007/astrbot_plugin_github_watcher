@@ -1,0 +1,42 @@
+{
+  "github_pat": {
+    "type": "string",
+    "description": "GitHub PAT，用于访问私有仓库。不要在群聊命令中设置。",
+    "default": ""
+  },
+  "poll_interval_seconds": {
+    "type": "int",
+    "description": "轮询 GitHub 的间隔秒数。",
+    "default": 60
+  },
+  "request_timeout_seconds": {
+    "type": "int",
+    "description": "GitHub API 请求超时时间（秒）。",
+    "default": 15
+  },
+  "max_retry_count": {
+    "type": "int",
+    "description": "GitHub API 请求失败后的最大重试次数。",
+    "default": 2
+  },
+  "enable_llm_summary_for_push": {
+    "type": "bool",
+    "description": "是否默认对 push 生成 LLM 中文摘要。",
+    "default": true
+  },
+  "enable_llm_summary_for_release": {
+    "type": "bool",
+    "description": "是否默认对 release 生成 LLM 中文摘要。",
+    "default": true
+  },
+  "notify_on_error": {
+    "type": "bool",
+    "description": "轮询或摘要失败时是否记录并允许查看错误。",
+    "default": true
+  },
+  "status_error_limit": {
+    "type": "int",
+    "description": "状态页和错误页最多展示多少条最近错误。",
+    "default": 10
+  }
+}
