@@ -70,7 +70,14 @@ class Storage:
 
     def _parse_group(self, group_id: str, data: dict[str, Any]) -> GroupSubscription:
         repos = tuple(self._parse_repo_subscription(item) for item in data.get("repos", []))
-        return GroupSubscription(group_id=group_id, repos=repos, enabled=bool(data.get("enabled", True)))
+        return GroupSubscription(
+            group_id=group_id,
+            repos=repos,
+            enabled=bool(data.get("enabled", True)),
+            platform_name=str(data.get("platform_name", "")),
+            platform_id=str(data.get("platform_id", "")),
+            unified_msg_origin=str(data.get("unified_msg_origin", "")),
+        )
 
     def _parse_repo_subscription(self, data: dict[str, Any]) -> RepoSubscription:
         repo = RepoRef(owner=data["owner"], repo=data["repo"])
@@ -96,6 +103,9 @@ class Storage:
     def _dump_group(self, group: GroupSubscription) -> dict[str, Any]:
         return {
             "enabled": group.enabled,
+            "platform_name": group.platform_name,
+            "platform_id": group.platform_id,
+            "unified_msg_origin": group.unified_msg_origin,
             "repos": [self._dump_repo_subscription(repo) for repo in group.repos],
         }
 

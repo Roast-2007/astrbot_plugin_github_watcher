@@ -5,15 +5,13 @@ from dataclasses import replace
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Poke
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.platform.message_session import MessageSession
-from astrbot.core.platform.message_type import MessageType
 
 from .github_client import GitHubClient
-from .models import GroupSubscription, RepoRef, RepoSubscription, RuntimeState, StoredRepoState
+from .models import GroupSubscription, NormalizedEvent, RepoRef, RepoSubscription, RuntimeState, StoredRepoState
 from .permissions import is_group_admin_or_owner
 from .poller import Poller
 from .renderer import render_event
@@ -68,8 +66,14 @@ class GitHubWatcherPlugin(Star):
         if not group_id:
             yield event.plain_result("请在群聊中使用此命令。")
             return
+        if not self._is_aiocqhttp_event(event):
+            yield event.plain_result("当前插件只支持 aiocqhttp 群会话。")
+            return
+        if self._find_group_by_event(event) is not None:
+            await self._maybe_ack_command_with_poke(event)
         async with self._lock:
             self._state = self._ensure_group_exists(group_id)
+            self._state = self._capture_group_route(self._state, event)
             self._storage.save(self._state)
         yield event.plain_result(f"已将群 {group_id} 加入白名单。")
 
@@ -79,20 +83,22 @@ class GitHubWatcherPlugin(Star):
         if not await self._ensure_group_admin(event):
             yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
             return
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用此命令。")
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
             return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
         async with self._lock:
             groups = dict(self._state.groups)
-            groups.pop(group_id, None)
+            groups.pop(group.group_id, None)
             self._state = RuntimeState(
                 groups=groups,
                 repo_states=self._state.repo_states,
                 recent_errors=self._state.recent_errors,
             )
             self._storage.save(self._state)
-        yield event.plain_result(f"已将群 {group_id} 移出白名单。")
+        yield event.plain_result(f"已将群 {group.group_id} 移出白名单。")
 
     @ghwatch.command("add")
     async def add_repo(
@@ -105,13 +111,15 @@ class GitHubWatcherPlugin(Star):
         if not await self._ensure_group_admin(event):
             yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
             return
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用此命令。")
+        error_message, group = self._require_whitelisted_group(
+            event,
+            "当前群不在白名单中。请先执行 /ghwatch whitelist。",
+        )
+        if error_message:
+            yield event.plain_result(error_message)
             return
-        if not self._is_whitelisted_group(group_id):
-            yield event.plain_result("当前群不在白名单中。请先执行 /ghwatch whitelist。")
-            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
         repo_ref = self._parse_repo_full_name(repo_full_name)
         if repo_ref is None:
             yield event.plain_result("仓库格式错误，请使用 owner/repo。")
@@ -127,10 +135,11 @@ class GitHubWatcherPlugin(Star):
             branch.strip() for branch in branches.split(",") if branch.strip()
         )
         async with self._lock:
-            self._state = self._upsert_repo_subscription(group_id, repo_ref, branch_list)
+            self._state = self._upsert_repo_subscription(group.group_id, repo_ref, branch_list)
+            self._state = self._capture_group_route(self._state, event)
             self._storage.save(self._state)
         yield event.plain_result(
-            f"已为群 {group_id} 添加仓库 {repo_ref.full_name} 的订阅。"
+            f"已为群 {group.group_id} 添加仓库 {repo_ref.full_name} 的订阅。"
         )
 
     @ghwatch.command("remove")
@@ -139,38 +148,37 @@ class GitHubWatcherPlugin(Star):
         if not await self._ensure_group_admin(event):
             yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
             return
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用此命令。")
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
             return
-        if not self._is_whitelisted_group(group_id):
-            yield event.plain_result("当前群不在白名单中。")
-            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
         repo_ref = self._parse_repo_full_name(repo_full_name)
         if repo_ref is None:
             yield event.plain_result("仓库格式错误，请使用 owner/repo。")
             return
         async with self._lock:
-            self._state = self._remove_repo_subscription(group_id, repo_ref)
+            self._state = self._remove_repo_subscription(group.group_id, repo_ref)
+            self._state = self._capture_group_route(self._state, event)
             self._storage.save(self._state)
         yield event.plain_result(f"已移除仓库 {repo_ref.full_name}。")
 
     @ghwatch.command("list")
     async def list_repos(self, event: AstrMessageEvent):
         """查看当前群的订阅列表。"""
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用此命令。")
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
             return
-        if not self._is_whitelisted_group(group_id):
-            yield event.plain_result("当前群不在白名单中。")
-            return
-        group = self._state.groups.get(group_id)
-        if group is None or not group.repos:
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        current_group = self._find_group_by_event(event) or group
+        if not current_group.repos:
             yield event.plain_result("当前群还没有 GitHub 订阅。")
             return
         lines = ["当前群订阅："]
-        for repo in group.repos:
+        for repo in current_group.repos:
             branch_desc = ", ".join(repo.branches) if repo.branches else "全部分支"
             lines.append(f"- {repo.repo.full_name} [{branch_desc}]")
         yield event.plain_result("\n".join(lines))
@@ -181,35 +189,43 @@ class GitHubWatcherPlugin(Star):
         if not await self._ensure_group_admin(event):
             yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
             return
-        group_id = event.get_group_id()
-        if not group_id:
-            yield event.plain_result("请在群聊中使用此命令。")
+        error_message, _group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
             return
-        if not self._is_whitelisted_group(group_id):
-            yield event.plain_result("当前群不在白名单中。")
-            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
         repo_ref = self._parse_repo_full_name(repo_full_name)
         if repo_ref is None:
             yield event.plain_result("仓库格式错误，请使用 owner/repo。")
             return
-        message = MessageChain(
-            [
-                Plain(
-                    f"[GitHub更新] {repo_ref.full_name}\n类型：测试通知\n链接：https://github.com/{repo_ref.full_name}"
+        await event.send(
+            render_event(
+                NormalizedEvent(
+                    type="test",
+                    repo_full_name=repo_ref.full_name,
+                    title="这是一条测试通知",
+                    url=f"https://github.com/{repo_ref.full_name}",
                 )
-            ],
+            )
         )
-        await event.send(message)
         yield event.plain_result("测试通知已发送。")
 
     @ghwatch.command("status")
     async def status(self, event: AstrMessageEvent):
         """查看插件状态。"""
+        group_id = event.get_group_id()
+        current_group: GroupSubscription | None = None
+        if group_id:
+            current_group = self._find_group_by_event(event)
+            if current_group is not None:
+                await self._maybe_refresh_group_route(event)
+                await self._maybe_ack_command_with_poke(event)
+                current_group = self._find_group_by_event(event) or current_group
         repo_count = sum(len(group.repos) for group in self._state.groups.values())
         error_count = len(self._state.recent_errors)
-        group_id = event.get_group_id()
         whitelist_status = (
-            "当前群已在白名单中" if group_id and self._is_whitelisted_group(group_id) else "当前群不在白名单中"
+            "当前群已在白名单中" if current_group is not None else "当前群不在白名单中"
         )
         yield event.plain_result(
             "\n".join(
@@ -226,6 +242,9 @@ class GitHubWatcherPlugin(Star):
     @ghwatch.command("errors")
     async def errors(self, event: AstrMessageEvent):
         """查看最近错误。"""
+        if self._find_group_by_event(event) is not None:
+            await self._maybe_refresh_group_route(event)
+            await self._maybe_ack_command_with_poke(event)
         if not self._state.recent_errors:
             yield event.plain_result("最近没有错误记录。")
             return
@@ -251,7 +270,12 @@ class GitHubWatcherPlugin(Star):
         updated_repo_states = dict(self._state.repo_states)
         groups = list(self._state.groups.values())
         for group in groups:
-            if not group.enabled:
+            if not group.enabled or group.platform_name != "aiocqhttp":
+                continue
+            if not group.unified_msg_origin:
+                await self._record_error(
+                    f"群 {group.group_id} 路由未初始化，请在目标群发送一条消息或重新执行 /ghwatch whitelist"
+                )
                 continue
             for subscription in group.repos:
                 if not subscription.enabled:
@@ -291,12 +315,7 @@ class GitHubWatcherPlugin(Star):
                                 event_to_send = replace(normalized_event, summary=summary)
                     except Exception as exc:  # noqa: BLE001
                         await self._record_error(f"{repo_key} 摘要失败: {exc}")
-                    session = MessageSession(
-                        platform_name="aiocqhttp",
-                        message_type=MessageType.GROUP_MESSAGE,
-                        session_id=group.group_id,
-                    )
-                    await self.context.send_message(session, render_event(event_to_send))
+                    await self.context.send_message(group.unified_msg_origin, render_event(event_to_send))
 
     async def _record_error(self, message: str) -> None:
         async with self._lock:
@@ -310,6 +329,56 @@ class GitHubWatcherPlugin(Star):
     async def _ensure_group_admin(self, event: AstrMessageEvent) -> bool:
         return await is_group_admin_or_owner(event)
 
+    async def _maybe_refresh_group_route(self, event: AstrMessageEvent) -> None:
+        group = self._find_group_by_event(event)
+        if group is None:
+            return
+        async with self._lock:
+            self._state = self._capture_group_route(self._state, event)
+            self._storage.save(self._state)
+
+    async def _maybe_ack_command_with_poke(self, event: AstrMessageEvent) -> None:
+        if self._find_group_by_event(event) is None:
+            return
+        await event.send(MessageChain([Poke(id=str(event.get_sender_id()))]))
+
+    def _is_aiocqhttp_event(self, event: AstrMessageEvent) -> bool:
+        return event.get_platform_name() == "aiocqhttp"
+
+    def _find_group_by_event(self, event: AstrMessageEvent) -> GroupSubscription | None:
+        group_id = event.get_group_id()
+        if not group_id:
+            return None
+        group = self._state.groups.get(group_id)
+        if group is None or not self._is_aiocqhttp_event(event):
+            return None
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "")
+        platform_id = event.get_platform_id()
+        if group.platform_name and group.platform_name != "aiocqhttp":
+            return None
+        if group.unified_msg_origin and unified_msg_origin and group.unified_msg_origin != unified_msg_origin:
+            return None
+        if group.platform_id and platform_id and group.platform_id != platform_id:
+            return None
+        return group
+
+    def _require_whitelisted_group(
+        self,
+        event: AstrMessageEvent,
+        missing_message: str,
+    ) -> tuple[str | None, GroupSubscription | None]:
+        group_id = event.get_group_id()
+        if not group_id:
+            return "请在群聊中使用此命令。", None
+        if not self._is_aiocqhttp_event(event):
+            return "当前插件只支持 aiocqhttp 群会话。", None
+        group = self._find_group_by_event(event)
+        if group is not None:
+            return None, group
+        if self._is_whitelisted_group(group_id):
+            return "当前 aiocqhttp 会话与已绑定的群路由不一致，请重新执行 /ghwatch whitelist。", None
+        return missing_message, None
+
     def _is_whitelisted_group(self, group_id: str) -> bool:
         return group_id in self._state.groups
 
@@ -321,6 +390,29 @@ class GitHubWatcherPlugin(Star):
             groups=groups,
             repo_states=self._state.repo_states,
             recent_errors=self._state.recent_errors,
+        )
+
+    def _capture_group_route(self, state: RuntimeState, event: AstrMessageEvent) -> RuntimeState:
+        group_id = event.get_group_id()
+        if not group_id or not self._is_aiocqhttp_event(event):
+            return state
+        existing = state.groups.get(group_id, GroupSubscription(group_id=group_id))
+        platform_name = event.get_platform_name() or existing.platform_name
+        platform_id = event.get_platform_id() or existing.platform_id
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "") or existing.unified_msg_origin
+        groups = dict(state.groups)
+        groups[group_id] = GroupSubscription(
+            group_id=existing.group_id,
+            repos=existing.repos,
+            enabled=existing.enabled,
+            platform_name=platform_name,
+            platform_id=platform_id,
+            unified_msg_origin=unified_msg_origin,
+        )
+        return RuntimeState(
+            groups=groups,
+            repo_states=state.repo_states,
+            recent_errors=state.recent_errors,
         )
 
     def _parse_repo_full_name(self, repo_full_name: str) -> RepoRef | None:
@@ -345,6 +437,9 @@ class GitHubWatcherPlugin(Star):
             group_id=group_id,
             repos=tuple(repos),
             enabled=True,
+            platform_name=group.platform_name,
+            platform_id=group.platform_id,
+            unified_msg_origin=group.unified_msg_origin,
         )
         return RuntimeState(
             groups=groups,
@@ -364,6 +459,9 @@ class GitHubWatcherPlugin(Star):
             group_id=group_id,
             repos=repos,
             enabled=group.enabled,
+            platform_name=group.platform_name,
+            platform_id=group.platform_id,
+            unified_msg_origin=group.unified_msg_origin,
         )
         return RuntimeState(
             groups=groups,

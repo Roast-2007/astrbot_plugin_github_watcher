@@ -12,6 +12,7 @@ EventType = Literal[
     "branch_delete",
     "pr_opened",
     "pr_merged",
+    "test",
 ]
 
 
@@ -66,6 +67,9 @@ class GroupSubscription:
     group_id: str
     repos: tuple[RepoSubscription, ...] = field(default_factory=tuple)
     enabled: bool = True
+    platform_name: str = ""
+    platform_id: str = ""
+    unified_msg_origin: str = ""
 
 
 @dataclass(frozen=True)
