@@ -119,6 +119,19 @@ pip install -r requirements.txt
 - `status_error_limit`
   - `/ghwatch errors` 最多展示多少条错误，默认 `10`
 
+### 错误通知
+
+- `alert_on_error`
+  - 是否启用主动错误通知，默认 `true`
+- `alert_network_error`
+  - 是否将网络错误推送到告警群，默认 `true`
+- `alert_rate_limit`
+  - 是否将速率限制错误推送到告警群，默认 `true`
+- `alert_auth_failure`
+  - 是否将认证失败错误推送到告警群，默认 `true`
+- `alert_not_found`
+  - 是否将资源不存在错误推送到告警群，默认 `true`
+
 ## GitHub PAT 权限建议
 
 如果你要监测私有仓库，PAT 至少要能读取目标仓库内容。
@@ -199,6 +212,44 @@ pip install -r requirements.txt
 /ghwatch errors
 ```
 
+### 8. 管理事件通知开关
+
+```text
+/ghwatch event owner/repo push on
+/ghwatch event owner/repo release off
+```
+
+支持的事件类型: `push`, `release`, `branch_create`, `branch_delete`, `pr_opened`, `pr_merged`
+
+### 9. 管理 LLM 摘要开关
+
+```text
+/ghwatch summary-toggle owner/repo push on
+/ghwatch summary-toggle owner/repo release off
+```
+
+### 10. 管理分支过滤
+
+```text
+/ghwatch branch-filter owner/repo add main
+/ghwatch branch-filter owner/repo remove dev
+```
+
+### 11. 检查 PAT 健康状态
+
+```text
+/ghwatch health
+```
+
+### 12. 管理错误通知接收群
+
+```text
+/ghwatch alert-group add
+/ghwatch alert-group remove
+```
+
+添加后，当轮询或摘要失败时，错误信息会主动推送到该群。
+
 ## 命令行为说明
 
 - 只有白名单中的 `aiocqhttp` 群可以正常执行订阅相关命令。
@@ -216,6 +267,11 @@ pip install -r requirements.txt
 | `/ghwatch test owner/repo` | 发送测试通知 |
 | `/ghwatch status` | 查看插件状态 |
 | `/ghwatch errors` | 查看最近错误 |
+| `/ghwatch event owner/repo <type> <on\|off>` | 切换指定仓库的事件通知开关 |
+| `/ghwatch summary-toggle owner/repo <push\|release> <on\|off>` | 切换指定仓库的 LLM 摘要开关 |
+| `/ghwatch branch-filter owner/repo <add\|remove> <branch>` | 管理仓库的分支过滤列表 |
+| `/ghwatch health` | 检查 GitHub PAT 健康状态 |
+| `/ghwatch alert-group <add\|remove>` | 管理错误通知接收群 |
 
 ## 消息示例
 
@@ -262,14 +318,11 @@ pip install -r requirements.txt
 
 这是首版实现，目前有这些已知边界：
 
-1. 轮询模式下，分支 rename 当前按“删 + 建”处理
-2. 还没有提供“按仓库动态切换某一类事件开关”的群命令
-3. 还没有提供“修改已订阅仓库的摘要开关”的群命令
-4. 还没有提供“按仓库不同 PAT / 多 Token 路由”
-5. 还没有提供 webhook 模式
-6. 错误目前以记录和查询为主，不会主动向群推送失败告警
-7. 摘要复用 AstrBot 当前模型，不支持插件级独立模型配置
-8. 首次订阅不会补发历史事件
+1. 轮询模式下，分支 rename 当前按”删 + 建”处理
+2. 还没有提供”按仓库不同 PAT / 多 Token 路由”
+3. 还没有提供 webhook 模式
+4. 摘要复用 AstrBot 当前模型，不支持插件级独立模型配置
+5. 首次订阅不会补发历史事件
 
 ## 目录结构
 
@@ -284,27 +337,31 @@ pip install -r requirements.txt
 - `summarizer.py`：LLM 摘要逻辑
 - `renderer.py`：消息渲染
 - `permissions.py`：权限判断
+- `error_notifier.py`：错误主动通知
 - `_conf_schema.json`：插件配置 schema
 - `metadata.yaml`：插件元数据
 
 ## 开发状态
 
-当前版本：`v0.1.1`
+当前版本：`v0.2.0`
 
 定位：
 
-- 先完成“可用的首版闭环”
-- 重点验证：白名单群订阅、私有仓库访问、轮询去重、群通知、LLM 摘要
+- 完善群维度事件/摘要/分支控制
+- 增强错误分类与主动告警能力
+- 启动时自动验证 PAT 有效性
 
 ## 未来路线图
 
-### v0.2
+### v0.2 (已完成)
 
-- [ ] 增加事件开关管理命令
-- [ ] 增加分支管理命令（追加 / 删除分支过滤）
-- [ ] 增加摘要开关管理命令
-- [ ] 启动时做 GitHub PAT 健康检查
-- [ ] 更明确的错误分类与可读错误提示
+- [x] 增加事件开关管理命令 (`/ghwatch event`)
+- [x] 增加分支管理命令 (`/ghwatch branch-filter`)
+- [x] 增加摘要开关管理命令 (`/ghwatch summary-toggle`)
+- [x] 启动时做 GitHub PAT 健康检查
+- [x] 更明确的错误分类与可读错误提示
+- [x] 增加错误主动通知群功能 (`/ghwatch alert-group`)
+- [x] 手动 PAT 健康检查命令 (`/ghwatch health`)
 
 ### v0.3
 
@@ -319,7 +376,6 @@ pip install -r requirements.txt
 - [ ] 支持多 Token 路由
 - [ ] 支持按仓库绑定不同认证信息
 - [ ] 支持插件级独立 LLM 配置
-- [ ] 支持主动错误告警群
 
 ### v0.5+
 

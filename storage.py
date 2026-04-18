@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    AlertGroup,
+    ErrorNotificationConfig,
     ErrorRecord,
     GroupSubscription,
     RepoEventSettings,
@@ -34,10 +36,12 @@ class Storage:
             for repo_full_name, repo_state in raw.get("repo_states", {}).items()
         }
         recent_errors = tuple(raw.get("recent_errors", []))
+        error_notification = self._parse_error_notification(raw.get("error_notification", {}))
         return RuntimeState(
             groups=groups,
             repo_states=repo_states,
             recent_errors=recent_errors,
+            error_notification=error_notification,
         )
 
     def save(self, state: RuntimeState) -> None:
@@ -51,6 +55,7 @@ class Storage:
                 for repo_full_name, repo_state in state.repo_states.items()
             },
             "recent_errors": list(state.recent_errors),
+            "error_notification": self._dump_error_notification(state.error_notification),
         }
         tmp_path = self._state_path.with_suffix(".tmp")
         tmp_path.write_text(
@@ -125,4 +130,34 @@ class Storage:
             "llm_push_summary": subscription.llm_push_summary,
             "llm_release_summary": subscription.llm_release_summary,
             "enabled": subscription.enabled,
+        }
+
+    def _parse_error_notification(self, data: dict[str, Any]) -> ErrorNotificationConfig:
+        alert_groups = tuple(
+            AlertGroup(
+                group_id=ag.get("group_id", ""),
+                platform_name=ag.get("platform_name", ""),
+                unified_msg_origin=ag.get("unified_msg_origin", ""),
+            )
+            for ag in data.get("alert_groups", [])
+        )
+        filter_levels = tuple(data.get("filter_levels", []))
+        return ErrorNotificationConfig(
+            enabled=bool(data.get("enabled", True)),
+            alert_groups=alert_groups,
+            filter_levels=filter_levels,
+        )
+
+    def _dump_error_notification(self, config: ErrorNotificationConfig) -> dict[str, Any]:
+        return {
+            "enabled": config.enabled,
+            "alert_groups": [
+                {
+                    "group_id": ag.group_id,
+                    "platform_name": ag.platform_name,
+                    "unified_msg_origin": ag.unified_msg_origin,
+                }
+                for ag in config.alert_groups
+            ],
+            "filter_levels": list(config.filter_levels),
         }

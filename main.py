@@ -8,8 +8,21 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
+from .error_notifier import ErrorNotifier
 from .github_client import GitHubClient
-from .models import GroupSubscription, NormalizedEvent, RepoRef, RepoSubscription, RuntimeState, StoredRepoState
+from .models import (
+    AlertGroup,
+    ErrorLevel,
+    ErrorNotificationConfig,
+    GitHubError,
+    GroupSubscription,
+    NormalizedEvent,
+    RepoEventSettings,
+    RepoRef,
+    RepoSubscription,
+    RuntimeState,
+    StoredRepoState,
+)
 from .permissions import is_group_admin_or_owner
 from .poller import Poller
 from .renderer import render_event
@@ -17,7 +30,7 @@ from .storage import Storage
 from .summarizer import Summarizer
 
 
-@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.1.1")
+@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.2.0")
 class GitHubWatcherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
@@ -28,6 +41,7 @@ class GitHubWatcherPlugin(Star):
         self._client: GitHubClient | None = None
         self._poller: Poller | None = None
         self._summarizer = Summarizer(context)
+        self._error_notifier = ErrorNotifier(context)
         self._polling_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
@@ -38,6 +52,10 @@ class GitHubWatcherPlugin(Star):
             max_retries=int(self.config.get("max_retry_count", 2)),
         )
         self._poller = Poller(self._client)
+        health = await self._client.check_health()
+        if not health.ok:
+            logger.warning("GitHub PAT 健康检查失败: %s", health.message)
+            await self._record_error(f"PAT 健康检查失败: {health.message}")
         self._polling_task = asyncio.create_task(self._poll_loop())
 
     async def terminate(self) -> None:
@@ -94,6 +112,7 @@ class GitHubWatcherPlugin(Star):
                 groups=groups,
                 repo_states=self._state.repo_states,
                 recent_errors=self._state.recent_errors,
+                error_notification=self._state.error_notification,
             )
             self._storage.save(self._state)
         yield event.plain_result(f"已将群 {group.group_id} 移出白名单。")
@@ -225,6 +244,7 @@ class GitHubWatcherPlugin(Star):
         whitelist_status = (
             "当前群已在白名单中" if current_group is not None else "当前群不在白名单中"
         )
+        alert_count = len(self._state.error_notification.alert_groups)
         yield event.plain_result(
             "\n".join(
                 [
@@ -233,6 +253,7 @@ class GitHubWatcherPlugin(Star):
                     f"- 已订阅仓库数：{repo_count}",
                     f"- 最近错误数：{error_count}",
                     f"- {whitelist_status}",
+                    f"- 告警群数：{alert_count}",
                 ],
             ),
         )
@@ -249,6 +270,163 @@ class GitHubWatcherPlugin(Star):
         limit = int(self.config.get("status_error_limit", 10))
         lines = ["最近错误：", *self._state.recent_errors[:limit]]
         yield event.plain_result("\n".join(lines))
+
+    @ghwatch.command("event")
+    async def toggle_event(
+        self,
+        event: AstrMessageEvent,
+        repo_full_name: str = "",
+        event_type: str = "",
+        state: str = "",
+    ):
+        """切换指定仓库的事件类型通知开关。ghwatch event owner/repo push on/off"""
+        if not await self._ensure_group_admin(event):
+            yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
+            return
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
+            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        repo_ref = self._parse_repo_full_name(repo_full_name)
+        if repo_ref is None:
+            yield event.plain_result("仓库格式错误，请使用 owner/repo。")
+            return
+        valid_types = ("push", "release", "branch_create", "branch_delete", "pr_opened", "pr_merged")
+        if event_type not in valid_types:
+            yield event.plain_result(f"事件类型无效，请使用: {', '.join(valid_types)}")
+            return
+        if state not in ("on", "off"):
+            yield event.plain_result("状态无效，请使用 on 或 off。")
+            return
+        enabled = state == "on"
+        async with self._lock:
+            self._state = self._toggle_repo_event(group.group_id, repo_ref, event_type, enabled)
+            self._state = self._capture_group_route(self._state, event)
+            self._storage.save(self._state)
+        action = "开启" if enabled else "关闭"
+        yield event.plain_result(f"已为 {repo_ref.full_name} {action} {event_type} 事件通知。")
+
+    @ghwatch.command("summary-toggle")
+    async def toggle_summary(
+        self,
+        event: AstrMessageEvent,
+        repo_full_name: str = "",
+        event_type: str = "",
+        state: str = "",
+    ):
+        """切换指定仓库的 LLM 摘要开关。ghwatch summary-toggle owner/repo push on/off"""
+        if not await self._ensure_group_admin(event):
+            yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
+            return
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
+            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        repo_ref = self._parse_repo_full_name(repo_full_name)
+        if repo_ref is None:
+            yield event.plain_result("仓库格式错误，请使用 owner/repo。")
+            return
+        if event_type not in ("push", "release"):
+            yield event.plain_result("事件类型无效，请使用 push 或 release。")
+            return
+        if state not in ("on", "off"):
+            yield event.plain_result("状态无效，请使用 on 或 off。")
+            return
+        enabled = state == "on"
+        async with self._lock:
+            self._state = self._toggle_repo_summary(group.group_id, repo_ref, event_type, enabled)
+            self._state = self._capture_group_route(self._state, event)
+            self._storage.save(self._state)
+        action = "开启" if enabled else "关闭"
+        yield event.plain_result(f"已为 {repo_ref.full_name} {action} {event_type} 的 LLM 摘要。")
+
+    @ghwatch.command("branch-filter")
+    async def branch_filter(
+        self,
+        event: AstrMessageEvent,
+        repo_full_name: str = "",
+        action: str = "",
+        branch_name: str = "",
+    ):
+        """管理仓库的分支过滤列表。ghwatch branch-filter owner/repo add/remove main"""
+        if not await self._ensure_group_admin(event):
+            yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
+            return
+        error_message, group = self._require_whitelisted_group(event, "当前群不在白名单中。")
+        if error_message:
+            yield event.plain_result(error_message)
+            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        repo_ref = self._parse_repo_full_name(repo_full_name)
+        if repo_ref is None:
+            yield event.plain_result("仓库格式错误，请使用 owner/repo。")
+            return
+        if action not in ("add", "remove"):
+            yield event.plain_result("操作无效，请使用 add 或 remove。")
+            return
+        if not branch_name:
+            yield event.plain_result("请提供分支名称。")
+            return
+        async with self._lock:
+            self._state = self._update_branch_filter(group.group_id, repo_ref, action, branch_name)
+            self._state = self._capture_group_route(self._state, event)
+            self._storage.save(self._state)
+        subscription = self._find_subscription(group.group_id, repo_ref)
+        branch_desc = ", ".join(subscription.branches) if subscription and subscription.branches else "全部分支"
+        if action == "add":
+            yield event.plain_result(f"已为 {repo_ref.full_name} 添加分支过滤: {branch_name}，当前过滤: {branch_desc}")
+        else:
+            yield event.plain_result(f"已为 {repo_ref.full_name} 移除分支过滤: {branch_name}，当前过滤: {branch_desc}")
+
+    @ghwatch.command("health")
+    async def health_check(self, event: AstrMessageEvent):
+        """手动检查 GitHub PAT 健康状态。"""
+        if not await self._ensure_group_admin(event):
+            yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
+            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        if self._client is None:
+            yield event.plain_result("GitHub 客户端尚未初始化。")
+            return
+        result = await self._client.check_health()
+        yield event.plain_result(f"GitHub PAT 状态：{'可用' if result.ok else '异常'} — {result.message}")
+
+    @ghwatch.command("alert-group")
+    async def alert_group(self, event: AstrMessageEvent, action: str = ""):
+        """添加或移除错误通知接收群。ghwatch alert-group add/remove"""
+        if not await self._ensure_group_admin(event):
+            yield event.plain_result("只有 AstrBot 超管或当前群管理员可以执行此操作。")
+            return
+        if action not in ("add", "remove"):
+            yield event.plain_result("操作无效，请使用 add 或 remove。")
+            return
+        group_id = event.get_group_id()
+        if not group_id:
+            yield event.plain_result("请在群聊中使用此命令。")
+            return
+        if not self._is_aiocqhttp_event(event):
+            yield event.plain_result("当前插件只支持 aiocqhttp 群会话。")
+            return
+        await self._maybe_refresh_group_route(event)
+        await self._maybe_ack_command_with_poke(event)
+        unified_msg_origin = str(getattr(event, "unified_msg_origin", "") or "")
+        platform_name = event.get_platform_name() or ""
+        async with self._lock:
+            self._state = self._update_alert_group(group_id, action, platform_name, unified_msg_origin)
+            self._state = self._capture_group_route(self._state, event)
+            self._storage.save(self._state)
+        current_config = self._state.error_notification
+        if current_config.alert_groups:
+            group_list = ", ".join(ag.group_id for ag in current_config.alert_groups)
+            yield event.plain_result(f"当前告警群: {group_list}")
+        else:
+            yield event.plain_result("当前没有告警群。")
 
     async def _poll_loop(self) -> None:
         while True:
@@ -284,12 +462,20 @@ class GitHubWatcherPlugin(Star):
                     outcome = await self._poller.poll_repo(subscription, previous_state)
                 except Exception as exc:  # noqa: BLE001
                     await self._record_error(f"{repo_key} 轮询失败: {exc}")
+                    try:
+                        error = GitHubClient.classify_error(exc)
+                        await self._error_notifier.notify(
+                            self._state.error_notification, repo_key, error
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     continue
                 updated_repo_states[repo_key] = outcome.new_state
                 self._state = RuntimeState(
                     groups=self._state.groups,
                     repo_states=updated_repo_states,
                     recent_errors=self._state.recent_errors,
+                    error_notification=self._state.error_notification,
                 )
                 self._storage.save(self._state)
                 for normalized_event in outcome.events:
@@ -313,6 +499,13 @@ class GitHubWatcherPlugin(Star):
                                 event_to_send = replace(normalized_event, summary=summary)
                     except Exception as exc:  # noqa: BLE001
                         await self._record_error(f"{repo_key} 摘要失败: {exc}")
+                        try:
+                            error = GitHubClient.classify_error(exc)
+                            await self._error_notifier.notify(
+                                self._state.error_notification, repo_key, error
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     await self.context.send_message(group.unified_msg_origin, render_event(event_to_send))
 
     async def _record_error(self, message: str) -> None:
@@ -386,6 +579,7 @@ class GitHubWatcherPlugin(Star):
             groups=groups,
             repo_states=self._state.repo_states,
             recent_errors=self._state.recent_errors,
+            error_notification=self._state.error_notification,
         )
 
     def _capture_group_route(self, state: RuntimeState, event: AstrMessageEvent) -> RuntimeState:
@@ -409,6 +603,7 @@ class GitHubWatcherPlugin(Star):
             groups=groups,
             repo_states=state.repo_states,
             recent_errors=state.recent_errors,
+            error_notification=state.error_notification,
         )
 
     def _parse_repo_full_name(self, repo_full_name: str) -> RepoRef | None:
@@ -441,6 +636,7 @@ class GitHubWatcherPlugin(Star):
             groups=groups,
             repo_states=self._state.repo_states,
             recent_errors=self._state.recent_errors,
+            error_notification=self._state.error_notification,
         )
 
     def _remove_repo_subscription(self, group_id: str, repo_ref: RepoRef) -> RuntimeState:
@@ -463,4 +659,164 @@ class GitHubWatcherPlugin(Star):
             groups=groups,
             repo_states=self._state.repo_states,
             recent_errors=self._state.recent_errors,
+            error_notification=self._state.error_notification,
+        )
+
+    def _toggle_repo_event(
+        self,
+        group_id: str,
+        repo_ref: RepoRef,
+        event_type: str,
+        enabled: bool,
+    ) -> RuntimeState:
+        groups = dict(self._state.groups)
+        group = groups.get(group_id)
+        if group is None:
+            return self._state
+        repos = []
+        for repo in group.repos:
+            if repo.repo.full_name == repo_ref.full_name:
+                events = replace(repo.events, **{event_type: enabled})
+                repos.append(replace(repo, events=events))
+            else:
+                repos.append(repo)
+        groups[group_id] = GroupSubscription(
+            group_id=group.group_id,
+            repos=tuple(repos),
+            enabled=group.enabled,
+            platform_name=group.platform_name,
+            platform_id=group.platform_id,
+            unified_msg_origin=group.unified_msg_origin,
+        )
+        return RuntimeState(
+            groups=groups,
+            repo_states=self._state.repo_states,
+            recent_errors=self._state.recent_errors,
+        )
+
+    def _toggle_repo_summary(
+        self,
+        group_id: str,
+        repo_ref: RepoRef,
+        event_type: str,
+        enabled: bool,
+    ) -> RuntimeState:
+        groups = dict(self._state.groups)
+        group = groups.get(group_id)
+        if group is None:
+            return self._state
+        repos = []
+        for repo in group.repos:
+            if repo.repo.full_name == repo_ref.full_name:
+                if event_type == "push":
+                    repos.append(replace(repo, llm_push_summary=enabled))
+                elif event_type == "release":
+                    repos.append(replace(repo, llm_release_summary=enabled))
+                else:
+                    repos.append(repo)
+            else:
+                repos.append(repo)
+        groups[group_id] = GroupSubscription(
+            group_id=group.group_id,
+            repos=tuple(repos),
+            enabled=group.enabled,
+            platform_name=group.platform_name,
+            platform_id=group.platform_id,
+            unified_msg_origin=group.unified_msg_origin,
+        )
+        return RuntimeState(
+            groups=groups,
+            repo_states=self._state.repo_states,
+            recent_errors=self._state.recent_errors,
+        )
+
+    def _update_branch_filter(
+        self,
+        group_id: str,
+        repo_ref: RepoRef,
+        action: str,
+        branch_name: str,
+    ) -> RuntimeState:
+        groups = dict(self._state.groups)
+        group = groups.get(group_id)
+        if group is None:
+            return self._state
+        repos = []
+        for repo in group.repos:
+            if repo.repo.full_name == repo_ref.full_name:
+                if action == "add":
+                    if branch_name not in repo.branches:
+                        new_branches = repo.branches + (branch_name,)
+                        repos.append(replace(repo, branches=new_branches))
+                    else:
+                        repos.append(repo)
+                elif action == "remove":
+                    new_branches = tuple(b for b in repo.branches if b != branch_name)
+                    repos.append(replace(repo, branches=new_branches))
+                else:
+                    repos.append(repo)
+            else:
+                repos.append(repo)
+        groups[group_id] = GroupSubscription(
+            group_id=group.group_id,
+            repos=tuple(repos),
+            enabled=group.enabled,
+            platform_name=group.platform_name,
+            platform_id=group.platform_id,
+            unified_msg_origin=group.unified_msg_origin,
+        )
+        return RuntimeState(
+            groups=groups,
+            repo_states=self._state.repo_states,
+            recent_errors=self._state.recent_errors,
+        )
+
+    def _find_subscription(
+        self,
+        group_id: str,
+        repo_ref: RepoRef,
+    ) -> RepoSubscription | None:
+        group = self._state.groups.get(group_id)
+        if group is None:
+            return None
+        for repo in group.repos:
+            if repo.repo.full_name == repo_ref.full_name:
+                return repo
+        return None
+
+    def _update_alert_group(
+        self,
+        group_id: str,
+        action: str,
+        platform_name: str,
+        unified_msg_origin: str,
+    ) -> RuntimeState:
+        config = self._state.error_notification
+        if action == "add":
+            new_groups = tuple(ag for ag in config.alert_groups if ag.group_id != group_id)
+            new_groups = (
+                *new_groups,
+                AlertGroup(
+                    group_id=group_id,
+                    platform_name=platform_name,
+                    unified_msg_origin=unified_msg_origin,
+                ),
+            )
+            new_config = ErrorNotificationConfig(
+                enabled=config.enabled,
+                alert_groups=new_groups,
+                filter_levels=config.filter_levels,
+            )
+        else:
+            new_groups = tuple(ag for ag in config.alert_groups if ag.group_id != group_id)
+            new_config = ErrorNotificationConfig(
+                enabled=config.enabled,
+                alert_groups=new_groups,
+                filter_levels=config.filter_levels,
+            )
+        return RuntimeState(
+            groups=self._state.groups,
+            repo_states=self._state.repo_states,
+            recent_errors=self._state.recent_errors,
+            error_notification=new_config,
         )

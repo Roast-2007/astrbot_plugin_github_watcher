@@ -83,11 +83,36 @@ class StoredRepoState:
     last_error: str = ""
 
 
+ErrorLevel = Literal["network_error", "rate_limit", "auth_failure", "not_found", "unknown"]
+
+
+@dataclass(frozen=True)
+class GitHubError:
+    level: ErrorLevel
+    status_code: int
+    message: str
+
+
+@dataclass(frozen=True)
+class AlertGroup:
+    group_id: str
+    platform_name: str = ""
+    unified_msg_origin: str = ""
+
+
+@dataclass(frozen=True)
+class ErrorNotificationConfig:
+    enabled: bool = True
+    alert_groups: tuple[AlertGroup, ...] = field(default_factory=tuple)
+    filter_levels: tuple[ErrorLevel, ...] = ("network_error", "rate_limit", "auth_failure")
+
+
 @dataclass(frozen=True)
 class RuntimeState:
     groups: dict[str, GroupSubscription] = field(default_factory=dict)
     repo_states: dict[str, StoredRepoState] = field(default_factory=dict)
     recent_errors: tuple[str, ...] = field(default_factory=tuple)
+    error_notification: ErrorNotificationConfig = field(default_factory=ErrorNotificationConfig)
 
 
 @dataclass(frozen=True)

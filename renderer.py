@@ -3,7 +3,7 @@ from __future__ import annotations
 from astrbot.api.message_components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
-from .models import NormalizedEvent
+from .models import ErrorLevel, GitHubError, NormalizedEvent
 
 
 def render_event_text(event: NormalizedEvent) -> str:
@@ -44,3 +44,23 @@ def render_event_text(event: NormalizedEvent) -> str:
 
 def render_event(event: NormalizedEvent) -> MessageChain:
     return MessageChain([Plain(render_event_text(event))])
+
+
+def render_error_text(repo_name: str, error: GitHubError) -> str:
+    level_map: dict[ErrorLevel, str] = {
+        "network_error": "网络错误",
+        "rate_limit": "速率限制",
+        "auth_failure": "认证失败",
+        "not_found": "资源不存在",
+        "unknown": "未知错误",
+    }
+    level_label = level_map.get(error.level, error.level)
+    return (
+        f"[GitHub Watcher 错误] {repo_name}\n"
+        f"级别：{level_label}\n"
+        f"详情：{error.message}"
+    )
+
+
+def render_error_message(repo_name: str, error: GitHubError) -> MessageChain:
+    return MessageChain([Plain(render_error_text(repo_name, error))])

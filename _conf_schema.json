@@ -38,5 +38,30 @@
     "type": "int",
     "description": "状态页和错误页最多展示多少条最近错误。",
     "default": 10
+  },
+  "alert_on_error": {
+    "type": "bool",
+    "description": "轮询或处理失败时是否主动向告警群推送错误通知。",
+    "default": true
+  },
+  "alert_network_error": {
+    "type": "bool",
+    "description": "是否将网络错误推送到告警群。",
+    "default": true
+  },
+  "alert_rate_limit": {
+    "type": "bool",
+    "description": "是否将速率限制错误推送到告警群。",
+    "default": true
+  },
+  "alert_auth_failure": {
+    "type": "bool",
+    "description": "是否将认证失败错误推送到告警群。",
+    "default": true
+  },
+  "alert_not_found": {
+    "type": "bool",
+    "description": "是否将资源不存在错误推送到告警群。",
+    "default": true
   }
 }

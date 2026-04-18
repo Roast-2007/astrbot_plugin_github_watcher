@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from .models import HealthCheckResult, PushCommit, RepoAccessResult, RepoRef
+from .models import ErrorLevel, GitHubError, HealthCheckResult, PushCommit, RepoAccessResult, RepoRef
 
 
 class GitHubClient:
@@ -36,12 +36,84 @@ class GitHubClient:
         try:
             response = await self._request("GET", "/user")
             if response.status_code == 401:
-                return HealthCheckResult(ok=False, message="GitHub PAT 无效或未提供。")
+                return HealthCheckResult(ok=False, message="GitHub PAT 无效或已过期，请检查配置。")
             if response.is_success:
                 return HealthCheckResult(ok=True, message="GitHub 认证可用。")
-            return HealthCheckResult(ok=False, message=f"GitHub 健康检查失败: HTTP {response.status_code}")
+            error = self.classify_error(response)
+            return HealthCheckResult(ok=False, message=error.message)
         except Exception as exc:  # noqa: BLE001
-            return HealthCheckResult(ok=False, message=f"GitHub 健康检查失败: {exc}")
+            error = self.classify_error(exc)
+            return HealthCheckResult(ok=False, message=error.message)
+
+    @staticmethod
+    def classify_error(response_or_exception: httpx.Response | Exception) -> GitHubError:
+        if isinstance(response_or_exception, httpx.Response):
+            status = response_or_exception.status_code
+            if status == 401:
+                return GitHubError(
+                    level="auth_failure",
+                    status_code=status,
+                    message="GitHub PAT 无效或已过期，请检查配置。",
+                )
+            if status == 403:
+                try:
+                    body = response_or_exception.json()
+                    message = body.get("message", "") if isinstance(body, dict) else ""
+                except Exception:
+                    message = ""
+                if "rate limit" in message.lower() or "api rate limit" in message.lower():
+                    return GitHubError(
+                        level="rate_limit",
+                        status_code=status,
+                        message="GitHub API 速率限制，请降低轮询频率或检查 PAT 配额。",
+                    )
+                return GitHubError(
+                    level="auth_failure",
+                    status_code=status,
+                    message="权限不足，请确认 PAT 拥有访问该仓库的权限。",
+                )
+            if status == 404:
+                return GitHubError(
+                    level="not_found",
+                    status_code=status,
+                    message="仓库或资源不存在，请检查仓库名称或 PAT 权限。",
+                )
+            if status == 429:
+                return GitHubError(
+                    level="rate_limit",
+                    status_code=status,
+                    message="GitHub API 速率限制，请降低轮询频率或检查 PAT 配额。",
+                )
+            if 500 <= status < 600:
+                return GitHubError(
+                    level="network_error",
+                    status_code=status,
+                    message=f"GitHub 服务器异常 (HTTP {status})，请稍后重试。",
+                )
+            return GitHubError(
+                level="unknown",
+                status_code=status,
+                message=f"未知错误 (HTTP {status})。",
+            )
+
+        exc = response_or_exception
+        if isinstance(exc, httpx.ConnectTimeout) or isinstance(exc, httpx.ConnectError):
+            return GitHubError(
+                level="network_error",
+                status_code=0,
+                message="无法连接到 GitHub，请检查网络连接。",
+            )
+        if isinstance(exc, httpx.TimeoutException):
+            return GitHubError(
+                level="network_error",
+                status_code=0,
+                message="连接 GitHub 超时，请检查网络或降低请求频率。",
+            )
+        return GitHubError(
+            level="network_error",
+            status_code=0,
+            message=f"网络请求异常: {exc}",
+        )
 
     async def validate_repo_access(self, repo: RepoRef) -> RepoAccessResult:
         response = await self._request("GET", f"/repos/{repo.full_name}")
