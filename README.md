@@ -24,7 +24,7 @@
 - **分支白名单过滤**：添加订阅时可指定只监测特定分支
 - **私有仓库访问**：通过单个全局 GitHub PAT 访问私有仓库
 - **本地持久化去重**：状态保存至 `state.json`，重启不丢失
-- **LLM 中文摘要**：对 push 和 release 事件调用 AstrBot LLM 生成摘要
+- **LLM 中文摘要**：对 push 和 release 事件调用 AstrBot LLM 生成摘要，push 摘要会附带变更文件统计（文件名、增删行数）辅助 LLM 分析
 - **手动测试通知**：随时发送测试消息验证推送是否正常
 - **状态与错误查看**：查看插件运行状态和最近错误记录
 - **事件级别开关**：可为每个仓库独立控制每种事件类型的通知开关
@@ -50,6 +50,7 @@
 - `release` 默认只看已发布版本，不推送 draft
 - 分支 rename 在轮询模式下当前视作"删 + 建"
 - `push` 与 `release` 摘要复用 AstrBot 当前会话默认模型能力
+- `push` 的 LLM 摘要 prompt 会附带变更文件统计（文件名、状态、增删行数），让 LLM 基于实际代码变更生成摘要，而非仅依赖提交消息
 - 主动推送会持久化当前 aiocqhttp 群会话路由，适配实例 ID 不必字面量等于 `aiocqhttp`
 - 通知文本统一按单条多行消息发送，避免字段粘连
 - 启动时自动对配置的 GitHub PAT 执行健康检查，验证其有效性
@@ -446,9 +447,21 @@ GitHub Watcher 状态：
 类型：Push
 分支：main
 标题：main 分支有 3 条新提交
-摘要：本次更新主要……
+摘要：本次更新新增了用户登录接口，修改了 auth 模块的验证逻辑，
+同时更新了相关测试用例。变更主要集中在 src/auth/ 目录下。
 链接：https://github.com/owner/repo/compare/...
 ```
+
+> **摘要增强**：push 事件的 LLM 摘要现在会附带变更文件统计信息。例如 LLM 收到的 prompt 包含：
+> ```
+> 变更文件（共 5 个文件）：
+> src/auth/login.py (modified +42/-8)
+> src/auth/verify.py (modified +15/-3)
+> tests/test_auth.py (modified +20/-2)
+> docs/AUTH.md (added +30/-0)
+> README.md (modified +2/-1)
+> ```
+> 这样 LLM 能基于实际变更的文件和行数生成更准确的摘要，而非仅依赖提交消息。
 
 ### Release
 
