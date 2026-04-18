@@ -17,6 +17,7 @@ from .models import (
     GitHubError,
     GroupSubscription,
     NormalizedEvent,
+    PollOutcome,
     RepoEventSettings,
     RepoRef,
     RepoSubscription,
@@ -444,6 +445,7 @@ class GitHubWatcherPlugin(Star):
             return
         initial_repo_states = dict(self._state.repo_states)
         updated_repo_states = dict(self._state.repo_states)
+        poll_cache: dict[str, PollOutcome] = {}
         groups = list(self._state.groups.values())
         for group in groups:
             if not group.enabled or group.platform_name != "aiocqhttp":
@@ -457,27 +459,31 @@ class GitHubWatcherPlugin(Star):
                 if not subscription.enabled:
                     continue
                 repo_key = subscription.repo.full_name
-                previous_state = initial_repo_states.get(repo_key, StoredRepoState())
-                try:
-                    outcome = await self._poller.poll_repo(subscription, previous_state)
-                except Exception as exc:  # noqa: BLE001
-                    await self._record_error(f"{repo_key} 轮询失败: {exc}")
+                if repo_key in poll_cache:
+                    outcome = poll_cache[repo_key]
+                else:
+                    previous_state = initial_repo_states.get(repo_key, StoredRepoState())
                     try:
-                        error = GitHubClient.classify_error(exc)
-                        await self._error_notifier.notify(
-                            self._state.error_notification, repo_key, error
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
-                    continue
-                updated_repo_states[repo_key] = outcome.new_state
-                self._state = RuntimeState(
-                    groups=self._state.groups,
-                    repo_states=updated_repo_states,
-                    recent_errors=self._state.recent_errors,
-                    error_notification=self._state.error_notification,
-                )
-                self._storage.save(self._state)
+                        outcome = await self._poller.poll_repo(subscription, previous_state)
+                    except Exception as exc:  # noqa: BLE001
+                        await self._record_error(f"{repo_key} 轮询失败: {exc}")
+                        try:
+                            error = GitHubClient.classify_error(exc)
+                            await self._error_notifier.notify(
+                                self._state.error_notification, repo_key, error
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        continue
+                    poll_cache[repo_key] = outcome
+                    updated_repo_states[repo_key] = outcome.new_state
+                    self._state = RuntimeState(
+                        groups=self._state.groups,
+                        repo_states=updated_repo_states,
+                        recent_errors=self._state.recent_errors,
+                        error_notification=self._state.error_notification,
+                    )
+                    self._storage.save(self._state)
                 for normalized_event in outcome.events:
                     event_to_send = normalized_event
                     try:
