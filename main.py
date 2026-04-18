@@ -31,7 +31,7 @@ from .storage import Storage
 from .summarizer import Summarizer
 
 
-@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.2.1")
+@register("astrbot_plugin_github_watcher", "Roast-2007", "GitHub 仓库监测插件", "0.2.2")
 class GitHubWatcherPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)

@@ -101,7 +101,7 @@ pip install -r requirements.txt
 
 - 插件名：`astrbot_plugin_github_watcher`
 - 展示名：`GitHub Watcher`
-- 版本：`v0.2.1`
+- 版本：`v0.2.2`
 - 支持平台：`aiocqhttp`
 - AstrBot 版本：`>=4.16,<5`
 
@@ -542,7 +542,7 @@ GitHub Watcher 状态：
 
 ## 开发状态
 
-当前版本：`v0.2.1`
+当前版本：`v0.2.2`
 
 定位：
 
