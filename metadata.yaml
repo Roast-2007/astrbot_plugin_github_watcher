@@ -1,7 +1,7 @@
 name: astrbot_plugin_github_watcher
 display_name: GitHub Watcher
 desc: 监测 GitHub 仓库的 push、release、分支与 PR 更新，并推送到白名单 QQ 群。
-version: v0.2.0
+version: v0.2.1
 author: Roast-2007
 repo: https://github.com/Roast-2007/astrbot_plugin_github_watcher
 support_platforms:
