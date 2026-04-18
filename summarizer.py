@@ -28,12 +28,17 @@ class Summarizer:
     def _build_prompt(self, event: NormalizedEvent) -> str:
         if event.type == "push":
             detail_text = "\n".join(event.details[:12])
-            return (
-                "请用简洁中文总结这次 GitHub push，限制在 2 到 4 句，不要编造细节。\n"
-                f"仓库：{event.repo_full_name}\n"
-                f"分支：{event.branch}\n"
-                f"提交列表：\n{detail_text}"
-            )
+            file_changes = str(event.payload.get("file_changes") or "").strip()
+            files_changed = int(event.payload.get("files_changed") or 0)
+            sections = [
+                "请用简洁中文总结这次 GitHub push，限制在 2 到 4 句，不要编造细节。",
+                f"仓库：{event.repo_full_name}",
+                f"分支：{event.branch}",
+            ]
+            if file_changes:
+                sections.append(f"变更文件（共 {files_changed} 个文件）：\n{file_changes}")
+            sections.append(f"提交列表：\n{detail_text}")
+            return "\n".join(sections)
         if event.type == "release":
             body = str(event.payload.get("body") or "")[:4000]
             tag_name = str(event.payload.get("tag_name") or "")

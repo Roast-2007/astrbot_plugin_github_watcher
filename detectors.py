@@ -77,6 +77,16 @@ async def detect_push_events(
         commits = GitHubClient.parse_compare_commits(compare)
         if not commits:
             continue
+        file_changes = compare.get("files", [])
+        diffstat_lines = []
+        for fc in file_changes[:30]:
+            filename = str(fc.get("filename") or "")
+            additions = int(fc.get("additions") or 0)
+            deletions = int(fc.get("deletions") or 0)
+            status = str(fc.get("status") or "")
+            diffstat_lines.append(f"{filename} ({status} +{additions}/-{deletions})")
+        if len(file_changes) > 30:
+            diffstat_lines.append(f"... 以及 {len(file_changes) - 30} 个文件")
         details = tuple(
             f"{commit.sha} {commit.author_name}: {commit.message.splitlines()[0]}"
             for commit in commits
@@ -102,6 +112,8 @@ async def detect_push_events(
                         }
                         for commit in commits
                     ],
+                    "file_changes": "\n".join(diffstat_lines) if diffstat_lines else "",
+                    "files_changed": len(file_changes),
                 },
             ),
         )
